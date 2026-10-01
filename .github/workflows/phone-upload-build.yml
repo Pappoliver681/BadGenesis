@@ -1,0 +1,105 @@
+name: Build BadGenesis from phone upload
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'BadGenesis-source.zip'
+      - '.github/workflows/phone-upload-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: badgenesis-phone-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      BG_PROJECT: badgenesis-phone-build/BadGenesis
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract the existing BadGenesis source archive
+        run: |
+          python3 - <<'PY'
+          import pathlib, zipfile
+          archive = pathlib.Path('BadGenesis-source.zip')
+          if not archive.is_file():
+              raise SystemExit('Upload BadGenesis-source.zip to the repository root first.')
+          destination = pathlib.Path('badgenesis-phone-build').resolve()
+          destination.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive) as source:
+              for entry in source.infolist():
+                  target = (destination / entry.filename).resolve()
+                  if not target.is_relative_to(destination):
+                      raise SystemExit('Source archive contains an unsafe path.')
+                  if not pathlib.PurePosixPath(entry.filename).parts or pathlib.PurePosixPath(entry.filename).parts[0] != 'BadGenesis':
+                      raise SystemExit('Expected the preserved BadGenesis project inside the archive.')
+              source.extractall(destination)
+          project = destination / 'BadGenesis'
+          for required in ('tools/cloud-build.sh', 'tests/run.cjs', 'app/src/main/AndroidManifest.xml', 'app/src/main/assets/BadGenesis.html'):
+              if not (project / required).is_file():
+                  raise SystemExit('The source archive is missing ' + required)
+          (project / 'dist').mkdir(exist_ok=True)
+          PY
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Retain the test app signing key for future updates
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BG_PROJECT }}/signing/badgenesis-development.keystore
+          key: badgenesis-development-signing-v1-${{ github.repository_id }}
+
+      - name: Cache verified compiler and Android tool downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BG_PROJECT }}/toolchain
+          key: badgenesis-tools-linux-api36-buildtools36-ecj342-v1
+
+      - name: Check the preserved emulator, RTC, audio and controls
+        run: |
+          node "$BG_PROJECT/tests/run.cjs" 2>&1 | tee "$BG_PROJECT/dist/validation.log"
+
+      - name: Compile and verify the existing Android 16 project
+        run: |
+          bash "$BG_PROJECT/tools/cloud-build.sh" 2>&1 | tee "$BG_PROJECT/dist/cloud-build.log"
+          sha256sum "$BG_PROJECT/dist/BadGenesis-Android16.apk" > "$BG_PROJECT/dist/BadGenesis-Android16.apk.sha256"
+
+      - name: Downloadable signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BadGenesis-Android16
+          path: |
+            ${{ env.BG_PROJECT }}/dist/BadGenesis-Android16.apk
+            ${{ env.BG_PROJECT }}/dist/BadGenesis-Android16.apk.sha256
+            ${{ env.BG_PROJECT }}/dist/apk-badging.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Keep build and validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BadGenesis-build-diagnostics
+          path: |
+            ${{ env.BG_PROJECT }}/dist/cloud-build.log
+            ${{ env.BG_PROJECT }}/dist/validation.log
+            ${{ env.BG_PROJECT }}/test-results/integration-report.json
+          if-no-files-found: ignore
+          retention-days: 7
+
