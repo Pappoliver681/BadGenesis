@@ -1,52 +1,56 @@
-name: Build BadGenesis from phone upload
+name: Build native BadGenesis from phone upload
 
 on:
   workflow_dispatch:
   push:
     paths:
       - 'BadGenesis-source.zip'
+      - '.github/workflows/phone-native-build.yml'
       - '.github/workflows/phone-upload-build.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: badgenesis-phone-build-${{ github.ref }}
+  group: badgenesis-native-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  apk:
+  native-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
     env:
-      BG_PROJECT: badgenesis-phone-build/BadGenesis
+      BG_PROJECT: badgenesis-native-build/BadGenesis
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract the existing BadGenesis source archive
+      - name: Extract the preserved project and native core
         run: |
           python3 - <<'PY'
           import pathlib, zipfile
           archive = pathlib.Path('BadGenesis-source.zip')
           if not archive.is_file():
-              raise SystemExit('Upload BadGenesis-source.zip to the repository root first.')
-          destination = pathlib.Path('badgenesis-phone-build').resolve()
+              raise SystemExit('Upload BadGenesis-source.zip at the repository root.')
+          destination = pathlib.Path('badgenesis-native-build').resolve()
           destination.mkdir(exist_ok=True)
           with zipfile.ZipFile(archive) as source:
               for entry in source.infolist():
                   target = (destination / entry.filename).resolve()
-                  if not target.is_relative_to(destination):
-                      raise SystemExit('Source archive contains an unsafe path.')
-                  if not pathlib.PurePosixPath(entry.filename).parts or pathlib.PurePosixPath(entry.filename).parts[0] != 'BadGenesis':
-                      raise SystemExit('Expected the preserved BadGenesis project inside the archive.')
+                  parts = pathlib.PurePosixPath(entry.filename).parts
+                  if not target.is_relative_to(destination) or not parts or parts[0] != 'BadGenesis':
+                      raise SystemExit('Unsafe or unexpected source archive path.')
               source.extractall(destination)
           project = destination / 'BadGenesis'
-          for required in ('tools/cloud-build.sh', 'tests/run.cjs', 'app/src/main/AndroidManifest.xml', 'app/src/main/assets/BadGenesis.html'):
-              if not (project / required).is_file():
-                  raise SystemExit('The source archive is missing ' + required)
+          required = ('tools/native-runtime-build.sh', 'tools/test-native.sh',
+                      'app/src/main/cpp/native_backend.cpp', 'app/src/main/cpp/rtc_engine.cpp',
+                      'app/src/main/java/com/badgenesis/app/NativeBridge.java',
+                      'vendor/genesis-plus-gx/libretro/libretro.c')
+          for name in required:
+              if not (project / name).is_file():
+                  raise SystemExit('Native project is missing ' + name)
           (project / 'dist').mkdir(exist_ok=True)
           PY
 
@@ -59,56 +63,62 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Retain the test app signing key for future updates
+      - name: Retain the app signing key for updates
         uses: actions/cache@v4
         with:
           path: ${{ env.BG_PROJECT }}/signing/badgenesis-development.keystore
           key: badgenesis-development-signing-v1-${{ github.repository_id }}
 
-      - name: Cache verified compiler and Android tool downloads
+      - name: Cache verified Android SDK and NDK downloads
         uses: actions/cache@v4
         with:
           path: ${{ env.BG_PROJECT }}/toolchain
-          key: badgenesis-tools-linux-api36-buildtools36-ecj342-v1
+          key: badgenesis-native-linux-api36-ndk28-v2
 
-      - name: Check the preserved emulator, RTC, audio and controls
+      - name: Validate native emulation before live RTC and rewind
         run: |
-          node "$BG_PROJECT/tests/run.cjs" 2>&1 | tee "$BG_PROJECT/dist/validation.log"
+          set -o pipefail
+          bash "$BG_PROJECT/tools/test-native.sh" 2>&1 | tee "$BG_PROJECT/dist/native-validation.log"
 
-      - name: Compile and verify the existing Android 16 project
+      - name: Compile, link, sign and verify the native Android APK
         run: |
-          python3 - "$BG_PROJECT/tools/cloud-build.sh" <<'PY'
-          import pathlib, sys
-          script = pathlib.Path(sys.argv[1])
-          source = script.read_text()
-          source = source.replace('java -Xmx1024m -jar "$BG_TOOLS/downloads/ecj-3.42.0.jar" -17 -proc:none', 'javac -J-Xmx1024m --release 17 -proc:none')
-          source = source.replace('-bootclasspath "$BG_ANDROID_JAR"', '-classpath "$BG_ANDROID_JAR"')
-          script.write_text(source)
-          PY
-          bash "$BG_PROJECT/tools/cloud-build.sh" 2>&1 | tee "$BG_PROJECT/dist/cloud-build.log"
-          sha256sum "$BG_PROJECT/dist/BadGenesis-Android16.apk" > "$BG_PROJECT/dist/BadGenesis-Android16.apk.sha256"
+          set -o pipefail
+          bash "$BG_PROJECT/tools/cloud-build.sh" 2>&1 | tee "$BG_PROJECT/dist/native-cloud-build.log"
+          sha256sum "$BG_PROJECT/dist/BadGenesis-Native-Android16.apk" > "$BG_PROJECT/dist/BadGenesis-Native-Android16.apk.sha256"
 
-      - name: Downloadable signed APK
+      - name: Downloadable native APK
         uses: actions/upload-artifact@v4
         with:
-          name: BadGenesis-Android16
+          name: BadGenesis-Native-Android16
           path: |
-            ${{ env.BG_PROJECT }}/dist/BadGenesis-Android16.apk
-            ${{ env.BG_PROJECT }}/dist/BadGenesis-Android16.apk.sha256
+            ${{ env.BG_PROJECT }}/dist/BadGenesis-Native-Android16.apk
+            ${{ env.BG_PROJECT }}/dist/BadGenesis-Native-Android16.apk.sha256
             ${{ env.BG_PROJECT }}/dist/apk-badging.txt
+            ${{ env.BG_PROJECT }}/dist/apk-native-verification.json
           if-no-files-found: error
           retention-days: 30
 
-      - name: Keep build and validation diagnostics
+      - name: Keep native build and test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BadGenesis-build-diagnostics
+          name: BadGenesis-Native-diagnostics
           path: |
-            ${{ env.BG_PROJECT }}/dist/cloud-build.log
-            ${{ env.BG_PROJECT }}/dist/validation.log
-            ${{ env.BG_PROJECT }}/test-results/integration-report.json
+            ${{ env.BG_PROJECT }}/dist/native-cloud-build.log
+            ${{ env.BG_PROJECT }}/dist/native-validation.log
+            ${{ env.BG_PROJECT }}/test-results/native-*.json
+            ${{ env.BG_PROJECT }}/test-results/native-*.jsonl
+            ${{ env.BG_PROJECT }}/test-results/native-*.log
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
-
+      - name: Source and notices accompanying the native build
+        uses: actions/upload-artifact@v4
+        with:
+          name: BadGenesis-Native-source
+          path: |
+            BadGenesis-source.zip
+            ${{ env.BG_PROJECT }}/vendor/genesis-plus-gx/LICENSE.txt
+            ${{ env.BG_PROJECT }}/vendor/genesis-plus-gx/PROVENANCE.md
+          if-no-files-found: error
+          retention-days: 30
