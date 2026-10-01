@@ -77,6 +77,14 @@ jobs:
 
       - name: Compile and verify the existing Android 16 project
         run: |
+          python3 - "$BG_PROJECT/tools/cloud-build.sh" <<'PY'
+          import pathlib, sys
+          script = pathlib.Path(sys.argv[1])
+          source = script.read_text()
+          source = source.replace('java -Xmx1024m -jar "$BG_TOOLS/downloads/ecj-3.42.0.jar" -17 -proc:none', 'javac -J-Xmx1024m --release 17 -proc:none')
+          source = source.replace('-bootclasspath "$BG_ANDROID_JAR"', '-classpath "$BG_ANDROID_JAR"')
+          script.write_text(source)
+          PY
           bash "$BG_PROJECT/tools/cloud-build.sh" 2>&1 | tee "$BG_PROJECT/dist/cloud-build.log"
           sha256sum "$BG_PROJECT/dist/BadGenesis-Android16.apk" > "$BG_PROJECT/dist/BadGenesis-Android16.apk.sha256"
 
@@ -102,4 +110,5 @@ jobs:
             ${{ env.BG_PROJECT }}/test-results/integration-report.json
           if-no-files-found: ignore
           retention-days: 7
+
 
